@@ -1,17 +1,19 @@
 import asyncio
 import time
-import sys
+import multiprocessing as mp
 
 # --- Test Configuration ---
 HOST = '127.0.0.1'
 PORT = 2525
-CONCURRENCY = 100       # Number of simultaneous clients
-DURATION = 10.0         # How long to run the test (seconds)
-PAYLOAD = b"Ping!"      # The data to send
+TOTAL_CONNECTIONS = 400   # 400 total clients
+PROCESSES = 4             # Use 4 CPU cores to generate load
+DURATION = 10.0
+PAYLOAD = b"Ping!"
 
-async def client_task(stats):
+async def client_task():
+    messages = 0
+    bytes_transferred = 0
     try:
-        # Open a non-blocking TCP connection to your C Server
         reader, writer = await asyncio.open_connection(HOST, PORT)
         end_time = time.time() + DURATION
         
@@ -19,46 +21,57 @@ async def client_task(stats):
             writer.write(PAYLOAD)
             await writer.drain()
             
-            # Wait for the C server to echo it back
             data = await reader.read(1024)
             if not data:
                 break
                 
-            stats['messages'] += 1
-            stats['bytes'] += len(data)
+            messages += 1
+            bytes_transferred += len(data)
             
         writer.close()
         await writer.wait_closed()
-        
-    except Exception as e:
-        stats['errors'] += 1
+        return messages, bytes_transferred, 0
+    except Exception:
+        return 0, 0, 1
 
-async def main():
-    print(f"Starting Load Test...")
-    print(f"Target: {HOST}:{PORT} | Connections: {CONCURRENCY} | Time: {DURATION}s")
+async def worker_loop(concurrency):
+    tasks = [client_task() for _ in range(concurrency)]
+    results = await asyncio.gather(*tasks)
     
-    stats = {'messages': 0, 'bytes': 0, 'errors': 0}
+    total_msgs = sum(r[0] for r in results)
+    total_bytes = sum(r[1] for r in results)
+    total_errors = sum(r[2] for r in results)
+    return total_msgs, total_bytes, total_errors
+
+def run_worker(concurrency):
+    # This runs in a completely separate CPU process
+    return asyncio.run(worker_loop(concurrency))
+
+if __name__ == '__main__':
+    print(f"Starting Multi-Core Load Test...")
+    print(f"Target: {HOST}:{PORT} | Total Connections: {TOTAL_CONNECTIONS} | Processes: {PROCESSES}")
     start_time = time.time()
     
-    # Spawn the concurrent clients
-    tasks = [client_task(stats) for _ in range(CONCURRENCY)]
-    await asyncio.gather(*tasks)
+    # Divide the connections evenly across the CPU cores
+    concurrency_per_process = TOTAL_CONNECTIONS // PROCESSES
+    
+    with mp.Pool(PROCESSES) as pool:
+        # Launch the 4 Python processes simultaneously
+        results = pool.map(run_worker, [concurrency_per_process] * PROCESSES)
     
     elapsed = time.time() - start_time
     
-    # Calculate Megabits per second (Mbps)
-    bits = stats['bytes'] * 8
-    mbps = (bits / 1_000_000) / elapsed
+    final_msgs = sum(r[0] for r in results)
+    final_bytes = sum(r[1] for r in results)
+    final_errors = sum(r[2] for r in results)
+    
+    mbps = ((final_bytes * 8) / 1_000_000) / elapsed
     
     print("\n-------------------------------------")
     print("Test Complete!")
     print(f"Time Elapsed     : {elapsed:.2f} seconds")
-    print(f"Total Messages   : {stats['messages']:,}")
-    print(f"Data Transferred : {stats['bytes'] / 1_000_000:.2f} MB")
+    print(f"Total Messages   : {final_msgs:,}")
+    print(f"Data Transferred : {final_bytes / 1_000_000:.2f} MB")
     print(f"Throughput       : {mbps:.2f} Mbps")
-    print(f"Socket Errors    : {stats['errors']}")
+    print(f"Socket Errors    : {final_errors}")
     print("-------------------------------------")
-
-if __name__ == "__main__":
-    # Windows users might need a different event loop policy, but on Linux this is perfect
-    asyncio.run(main())
