@@ -26,3 +26,9 @@ Throughput       : 3.05 Mbps
 Socket Errors    : 0
 -------------------------------------
 ```
+
+### Run
+
+1. ` gcc -O3 -march=native -std=c11 server.cpp -o server -pthread`
+2. `./server`
+3. `python3 load_test.py`
